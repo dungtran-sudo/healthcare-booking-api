@@ -78,8 +78,8 @@ console.log('Search query received:', q); // ADD THIS
     }
 
     const { data: services, error } = await query
-      .order('discounted_price', { ascending: true })
-      .limit(50);
+    //   .order('discounted_price', { ascending: true })
+    //   .limit(50);
 
     if (error) throw error;
     console.log('Results count:', services?.length); // ADD THIS
