@@ -441,6 +441,7 @@ app.get('/api/branches/:id', async (req, res) => {
 // ============================================
 
 // Create booking
+// Create booking
 app.post('/api/bookings', async (req, res) => {
   try {
     const {
@@ -456,32 +457,73 @@ app.post('/api/bookings', async (req, res) => {
       service_mode,
       promo_code,
       patient_notes,
-      created_by_email
+      created_by_email,
+      cart_items // NEW: Array of test IDs for multi-test bookings
     } = req.body;
 
     // Validate required fields
-    if (!provider_service_id || !branch_id || !patient_name || !patient_phone || !appointment_date) {
+    if (!branch_id || !patient_name || !patient_phone || !appointment_date) {
       return res.status(400).json({
         success: false,
         error: 'Missing required fields'
       });
     }
 
-    // Get service details for pricing
-    const { data: service } = await supabase
-      .from('provider_services')
-      .select('*, providers(*)')
-      .eq('id', provider_service_id)
-      .single();
+    // Check if this is a multi-test booking
+    const isCustomBundle = cart_items && cart_items.length > 0;
+    
+    let service, listed_price, provider_id;
 
-    if (!service) {
-      return res.status(404).json({
-        success: false,
-        error: 'Service not found'
-      });
+    if (isCustomBundle) {
+      // Multi-test booking
+      const { data: tests } = await supabase
+        .from('provider_services')
+        .select('*, providers(*)')
+        .in('id', cart_items.map(item => item.id));
+
+      if (!tests || tests.length === 0) {
+        return res.status(404).json({
+          success: false,
+          error: 'Tests not found'
+        });
+      }
+
+      provider_id = tests[0].provider_id;
+      listed_price = tests.reduce((sum, test) => 
+        sum + (parseFloat(test.discounted_price) || parseFloat(test.original_price) || 0), 0
+      );
+      
+      service = {
+        provider_id: provider_id,
+        providers: tests[0].providers
+      };
+    } else {
+      // Single service booking
+      if (!provider_service_id) {
+        return res.status(400).json({
+          success: false,
+          error: 'provider_service_id or cart_items required'
+        });
+      }
+
+      const { data: serviceData } = await supabase
+        .from('provider_services')
+        .select('*, providers(*)')
+        .eq('id', provider_service_id)
+        .single();
+
+      if (!serviceData) {
+        return res.status(404).json({
+          success: false,
+          error: 'Service not found'
+        });
+      }
+
+      service = serviceData;
+      provider_id = service.provider_id;
+      listed_price = service.discounted_price || service.original_price;
     }
 
-    const listed_price = service.discounted_price || service.original_price;
     let discount_amount = 0;
 
     // Apply promo code if provided
@@ -522,13 +564,15 @@ app.post('/api/bookings', async (req, res) => {
     const booking_reference = `HH-${providerCode}${bookingNumber}`;
 
     // Create booking
-    const { data: booking, error } = await supabase
+    const { data: booking, error: bookingError } = await supabase
       .from('bookings')
       .insert({
         booking_reference,
-        provider_id: service.provider_id,
+        provider_id: provider_id,
         branch_id,
-        provider_service_id,
+        provider_service_id: isCustomBundle ? null : provider_service_id,
+        booking_type: isCustomBundle ? 'custom_bundle' : 'single_service',
+        is_custom_bundle: isCustomBundle,
         patient_name,
         patient_phone,
         patient_email,
@@ -551,7 +595,25 @@ app.post('/api/bookings', async (req, res) => {
       .select()
       .single();
 
-    if (error) throw error;
+    if (bookingError) throw bookingError;
+
+    // If custom bundle, create booking items
+    if (isCustomBundle && cart_items) {
+      const bookingItems = cart_items.map(item => ({
+        booking_id: booking.id,
+        provider_service_id: item.id,
+        quantity: 1,
+        item_price: parseFloat(item.discounted_price) || 0
+      }));
+
+      const { error: itemsError } = await supabase
+        .from('booking_items')
+        .insert(bookingItems);
+
+      if (itemsError) {
+        console.error('Error creating booking items:', itemsError);
+      }
+    }
 
     res.json({
       success: true,
