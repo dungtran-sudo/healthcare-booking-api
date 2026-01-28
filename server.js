@@ -48,11 +48,12 @@ app.get('/api/search/services', async (req, res) => {
       .eq('status', 'active')
       .is('deleted_at', null);
 
-    // Text search
+// Text search - split query into words and match all
     if (q) {
-    query = query.or(
-        `provider_service_name.ilike.%${q}%,provider_service_name_vn.ilike.%${q}%`
-    );
+    const searchWords = q.toLowerCase().split(/\s+/).filter(w => w.length > 0);
+    searchWords.forEach(word => {
+        query = query.ilike('keywords', `%${word}%`);
+    });
     }
 
     // Provider filter
