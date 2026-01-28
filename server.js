@@ -50,7 +50,9 @@ app.get('/api/search/services', async (req, res) => {
 
     // Text search
     if (q) {
-      query = query.ilike('keywords', `%${q}%`);
+    query = query.or(
+        `provider_service_name.ilike.%${q}%,provider_service_name_vn.ilike.%${q}%`
+    );
     }
 
     // Provider filter
@@ -251,13 +253,47 @@ app.get('/api/services/:id', async (req, res) => {
           component:provider_services!component_service_id (
             id,
             provider_service_name_vn,
-            discounted_price
+            discounted_price,
+            canonical_service_id
           )
         `)
         .eq('package_service_id', id)
         .order('display_order');
 
-      components = componentData || [];
+      // Use canonical names for display
+      if (componentData) {
+        const canonicalIds = componentData
+          .map(c => c.component?.canonical_service_id)
+          .filter(Boolean);
+
+        // Fetch canonical test details
+        let canonicalTests = {};
+        if (canonicalIds.length > 0) {
+          const { data: canonicalData } = await supabase
+            .from('provider_services')
+            .select('id, provider_service_name_vn, discounted_price')
+            .in('id', canonicalIds);
+
+          canonicalData?.forEach(test => {
+            canonicalTests[test.id] = test;
+          });
+        }
+
+        // Map components to use canonical names
+        components = componentData.map(comp => {
+          const canonicalId = comp.component?.canonical_service_id;
+          const canonicalTest = canonicalId ? canonicalTests[canonicalId] : null;
+
+          return {
+            ...comp,
+            component: {
+              ...comp.component,
+              display_name: canonicalTest?.provider_service_name_vn || comp.component?.provider_service_name_vn,
+              display_price: canonicalTest?.discounted_price || comp.component?.discounted_price
+            }
+          };
+        });
+      }
     }
 
     res.json({
