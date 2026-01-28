@@ -34,7 +34,8 @@ app.get('/api/search/services', async (req, res) => {
       max_price,
       service_type
     } = req.query;
-
+console.log('Search query received:', q); // ADD THIS
+    console.log('Query params:', req.query); // ADD THIS
     let query = supabase
       .from('provider_services')
       .select(`
