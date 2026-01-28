@@ -52,6 +52,8 @@ console.log('Search query received:', q); // ADD THIS
 // Text search - split query into words and match all
     if (q) {
     const searchWords = q.toLowerCase().split(/\s+/).filter(w => w.length > 0);
+    console.log('Search query:', q); // ADD THIS
+    console.log('Search words:', searchWords); // ADD THIS
     searchWords.forEach(word => {
         query = query.ilike('keywords', `%${word}%`);
     });
@@ -80,6 +82,8 @@ console.log('Search query received:', q); // ADD THIS
       .limit(50);
 
     if (error) throw error;
+    console.log('Results count:', services?.length); // ADD THIS
+    console.log('Package 56 in results?', services?.some(s => s.id === 56)); // ADD THIS
 
     // If district/city filter, get branches
     let filteredServices = services;
@@ -217,7 +221,6 @@ app.get('/api/providers', async (req, res) => {
 // SERVICE DETAIL ENDPOINTS
 // ============================================
 
-// Get service details
 // Get service details
 app.get('/api/services/:id', async (req, res) => {
   try {
