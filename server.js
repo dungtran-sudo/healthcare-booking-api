@@ -218,11 +218,13 @@ app.get('/api/providers', async (req, res) => {
 // ============================================
 
 // Get service details
+// Get service details
 app.get('/api/services/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
-    const { data: service, error } = await supabase
+    // Get service details
+    const { data: service, error: serviceError } = await supabase
       .from('provider_services')
       .select(`
         *,
@@ -236,7 +238,7 @@ app.get('/api/services/:id', async (req, res) => {
       .eq('id', id)
       .single();
 
-    if (error) throw error;
+    if (serviceError) throw serviceError;
 
     // Get available branches count
     const { count: branchCount } = await supabase
@@ -245,30 +247,30 @@ app.get('/api/services/:id', async (req, res) => {
       .eq('provider_service_id', id)
       .eq('is_available', true);
 
-    // Get package components if it's a package
+    // Get package components if it's a package (SIMPLIFIED QUERY)
     let components = [];
     if (service.service_type === 'package') {
-      const { data: componentData } = await supabase
+      // Get component IDs first
+      const { data: componentLinks } = await supabase
         .from('package_components')
-        .select(`
-          *,
-          component:provider_services!component_service_id (
-            id,
-            provider_service_name_vn,
-            discounted_price,
-            canonical_service_id
-          )
-        `)
+        .select('component_service_id, display_order')
         .eq('package_service_id', id)
         .order('display_order');
 
-      // Use canonical names for display
-      if (componentData) {
-        const canonicalIds = componentData
-          .map(c => c.component?.canonical_service_id)
+      if (componentLinks && componentLinks.length > 0) {
+        const componentIds = componentLinks.map(c => c.component_service_id);
+
+        // Get test details
+        const { data: tests } = await supabase
+          .from('provider_services')
+          .select('id, provider_service_name_vn, discounted_price, canonical_service_id')
+          .in('id', componentIds);
+
+        // Get canonical test names
+        const canonicalIds = tests
+          .map(t => t.canonical_service_id)
           .filter(Boolean);
 
-        // Fetch canonical test details
         let canonicalTests = {};
         if (canonicalIds.length > 0) {
           const { data: canonicalData } = await supabase
@@ -281,17 +283,16 @@ app.get('/api/services/:id', async (req, res) => {
           });
         }
 
-        // Map components to use canonical names
-        components = componentData.map(comp => {
-          const canonicalId = comp.component?.canonical_service_id;
-          const canonicalTest = canonicalId ? canonicalTests[canonicalId] : null;
-
+        // Map to component structure
+        components = tests.map(test => {
+          const canonicalTest = canonicalTests[test.canonical_service_id];
           return {
-            ...comp,
             component: {
-              ...comp.component,
-              display_name: canonicalTest?.provider_service_name_vn || comp.component?.provider_service_name_vn,
-              display_price: canonicalTest?.discounted_price || comp.component?.discounted_price
+              id: test.id,
+              provider_service_name_vn: test.provider_service_name_vn,
+              discounted_price: test.discounted_price,
+              display_name: canonicalTest?.provider_service_name_vn || test.provider_service_name_vn,
+              display_price: canonicalTest?.discounted_price || test.discounted_price
             }
           };
         });
@@ -308,6 +309,7 @@ app.get('/api/services/:id', async (req, res) => {
     });
 
   } catch (error) {
+    console.error('Service detail error:', error);
     res.status(500).json({
       success: false,
       error: error.message
