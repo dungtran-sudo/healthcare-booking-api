@@ -4,6 +4,15 @@ import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
 
 dotenv.config();
+function normalizeVi(str = '') {
+  return str
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // strip diacritics
+    .replace(/đ/g, 'd')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -49,11 +58,15 @@ console.log('Search query received:', q); // ADD THIS
       .eq('status', 'active')
       .is('deleted_at', null);
 
-// Text search - split query into words and match all
+    // Text search - split query into words and match all
     if (q) {
-    const searchWords = q.toLowerCase().split(/\s+/).filter(w => w.length > 0);
-    console.log('Search query:', q); // ADD THIS
-    console.log('Search words:', searchWords); // ADD THIS
+    const qNorm = normalizeVi(q);
+    const searchWords = qNorm.split(' ').filter(w => w.length >= 2);
+
+    console.log('Search query:', q);
+    console.log('Normalized:', qNorm);
+    console.log('Search words:', searchWords);
+
     searchWords.forEach(word => {
         query = query.ilike('keywords', `%${word}%`);
     });
