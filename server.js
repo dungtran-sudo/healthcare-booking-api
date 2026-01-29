@@ -4,11 +4,12 @@ import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
 
 dotenv.config();
+
 function normalizeVi(str = '') {
   return str
     .toLowerCase()
     .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '') // strip diacritics
+    .replace(/[\u0300-\u036f]/g, '')
     .replace(/đ/g, 'd')
     .trim()
     .replace(/\s+/g, ' ');
@@ -35,16 +36,15 @@ const supabase = createClient(
 app.get('/api/search/services', async (req, res) => {
   try {
     const { 
-      q,           // search query
-      district,    // filter by district
-      city,        // filter by city
-      provider_id, // filter by provider
+      q,
+      district,
+      city,
+      provider_id,
       min_price,
       max_price,
       service_type
     } = req.query;
-console.log('Search query received:', q); // ADD THIS
-    console.log('Query params:', req.query); // ADD THIS
+
     let query = supabase
       .from('provider_services')
       .select(`
@@ -56,21 +56,17 @@ console.log('Search query received:', q); // ADD THIS
         )
       `)
       .eq('status', 'active')
-      .is('parent_service_id', null)  // Only show root services (not components)
+      .eq('is_bookable', true)
       .is('deleted_at', null);
 
-    // Text search - split query into words and match all
+    // Text search
     if (q) {
-    const qNorm = normalizeVi(q);
-    const searchWords = qNorm.split(' ').filter(w => w.length >= 2);
+      const qNorm = normalizeVi(q);
+      const searchWords = qNorm.split(' ').filter(w => w.length >= 2);
 
-    console.log('Search query:', q);
-    console.log('Normalized:', qNorm);
-    console.log('Search words:', searchWords);
-
-    searchWords.forEach(word => {
+      searchWords.forEach(word => {
         query = query.ilike('keywords', `%${word}%`);
-    });
+      });
     }
 
     // Provider filter
@@ -91,13 +87,9 @@ console.log('Search query received:', q); // ADD THIS
       query = query.lte('discounted_price', max_price);
     }
 
-    const { data: services, error } = await query
-    //   .order('discounted_price', { ascending: true })
-    //   .limit(50);
+    const { data: services, error } = await query.limit(200);
 
     if (error) throw error;
-    console.log('Results count:', services?.length); // ADD THIS
-    console.log('Package 56 in results?', services?.some(s => s.id === 56)); // ADD THIS
 
     // If district/city filter, get branches
     let filteredServices = services;
@@ -117,7 +109,6 @@ console.log('Search query received:', q); // ADD THIS
         .in('provider_service_id', serviceIds)
         .eq('is_available', true);
 
-      // Filter services that have branches in requested location
       const availableServiceIds = new Set();
       branchServices?.forEach(bs => {
         const matchDistrict = !district || bs.branches.district === district;
@@ -235,13 +226,11 @@ app.get('/api/providers', async (req, res) => {
 // SERVICE DETAIL ENDPOINTS
 // ============================================
 
-// Get service details
-// GET /api/services/:id - Get service with its children
+// Get service details with children
 app.get('/api/services/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Get the main service
     const { data: service, error: serviceError } = await supabase
       .from('provider_services')
       .select(`
@@ -261,7 +250,6 @@ app.get('/api/services/:id', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Service not found' });
     }
 
-    // Get immediate children (components) using parent_service_id
     const { data: children, error: childrenError } = await supabase
       .from('provider_services')
       .select(`
@@ -282,7 +270,6 @@ app.get('/api/services/:id', async (req, res) => {
 
     if (childrenError) throw childrenError;
 
-    // Format response (backward compatible with old 'components' structure)
     const response = {
       ...service,
       components: (children || []).map(child => ({
@@ -302,7 +289,7 @@ app.get('/api/services/:id', async (req, res) => {
   }
 });
 
-// GET /api/services/:id/children - Get immediate children only
+// Get immediate children only
 app.get('/api/services/:id/children', async (req, res) => {
   try {
     const { id } = req.params;
@@ -407,7 +394,6 @@ app.get('/api/branches/:id', async (req, res) => {
 
     if (error) throw error;
 
-    // Get available services at this branch
     const { data: services } = await supabase
       .from('branch_services')
       .select(`
@@ -448,7 +434,6 @@ app.get('/api/branches/:id', async (req, res) => {
 // ============================================
 
 // Create booking
-// Create booking
 app.post('/api/bookings', async (req, res) => {
   try {
     const {
@@ -465,10 +450,9 @@ app.post('/api/bookings', async (req, res) => {
       promo_code,
       patient_notes,
       created_by_email,
-      cart_items // NEW: Array of test IDs for multi-test bookings
+      cart_items
     } = req.body;
 
-    // Validate required fields
     if (!branch_id || !patient_name || !patient_phone || !appointment_date) {
       return res.status(400).json({
         success: false,
@@ -476,13 +460,11 @@ app.post('/api/bookings', async (req, res) => {
       });
     }
 
-    // Check if this is a multi-test booking
     const isCustomBundle = cart_items && cart_items.length > 0;
     
     let service, listed_price, provider_id;
 
     if (isCustomBundle) {
-      // Multi-test booking
       const { data: tests } = await supabase
         .from('provider_services')
         .select('*, providers(*)')
@@ -505,7 +487,6 @@ app.post('/api/bookings', async (req, res) => {
         providers: tests[0].providers
       };
     } else {
-      // Single service booking
       if (!provider_service_id) {
         return res.status(400).json({
           success: false,
@@ -533,7 +514,6 @@ app.post('/api/bookings', async (req, res) => {
 
     let discount_amount = 0;
 
-    // Apply promo code if provided
     if (promo_code) {
       const { data: promo } = await supabase
         .from('promotions')
@@ -557,11 +537,9 @@ app.post('/api/bookings', async (req, res) => {
 
     const final_price = listed_price - discount_amount;
 
-    // Calculate commission
     const commission_rate = service.commission_rate || service.providers.base_commission_rate;
     const commission_amount = final_price * commission_rate;
 
-    // Generate booking reference
     const providerCode = service.providers.provider_code.split('_')[1] || 'XXX';
     const count = await supabase
       .from('bookings')
@@ -570,7 +548,6 @@ app.post('/api/bookings', async (req, res) => {
     const bookingNumber = String((count.count || 0) + 1).padStart(5, '0');
     const booking_reference = `HH-${providerCode}${bookingNumber}`;
 
-    // Create booking
     const { data: booking, error: bookingError } = await supabase
       .from('bookings')
       .insert({
@@ -604,7 +581,6 @@ app.post('/api/bookings', async (req, res) => {
 
     if (bookingError) throw bookingError;
 
-    // If custom bundle, create booking items
     if (isCustomBundle && cart_items) {
       const bookingItems = cart_items.map(item => ({
         booking_id: booking.id,
@@ -672,14 +648,11 @@ app.get('/api/bookings/:reference', async (req, res) => {
 // REPORTS ENDPOINTS
 // ============================================
 
-// Booking summary report
 app.get('/api/reports/bookings', async (req, res) => {
   try {
     const { provider_id, month, status } = req.query;
 
-    let query = supabase
-      .from('bookings')
-      .select('*');
+    let query = supabase.from('bookings').select('*');
 
     if (provider_id) {
       query = query.eq('provider_id', provider_id);
@@ -703,7 +676,6 @@ app.get('/api/reports/bookings', async (req, res) => {
 
     if (error) throw error;
 
-    // Calculate summary
     const summary = {
       total: bookings.length,
       confirmed: bookings.filter(b => b.status === 'confirmed').length,
