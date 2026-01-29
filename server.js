@@ -56,6 +56,7 @@ console.log('Search query received:', q); // ADD THIS
         )
       `)
       .eq('status', 'active')
+      .is('parent_service_id', null)  // Only show root services (not components)
       .is('deleted_at', null);
 
     // Text search - split query into words and match all
@@ -235,101 +236,107 @@ app.get('/api/providers', async (req, res) => {
 // ============================================
 
 // Get service details
+// GET /api/services/:id - Get service with its children
 app.get('/api/services/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Get service details
+    // Get the main service
     const { data: service, error: serviceError } = await supabase
       .from('provider_services')
       .select(`
         *,
-        providers (
+        providers:provider_id (
+          id,
           brand_name_vn,
-          logo_url,
-          phone,
-          email
+          logo_url
         )
       `)
       .eq('id', id)
+      .eq('status', 'active')
       .single();
 
     if (serviceError) throw serviceError;
-
-    // Get available branches count
-    const { count: branchCount } = await supabase
-      .from('branch_services')
-      .select('*', { count: 'exact', head: true })
-      .eq('provider_service_id', id)
-      .eq('is_available', true);
-
-    // Get package components if it's a package (SIMPLIFIED QUERY)
-    let components = [];
-    if (service.service_type === 'package') {
-      // Get component IDs first
-      const { data: componentLinks } = await supabase
-        .from('package_components')
-        .select('component_service_id, display_order')
-        .eq('package_service_id', id)
-        .order('display_order');
-
-      if (componentLinks && componentLinks.length > 0) {
-        const componentIds = componentLinks.map(c => c.component_service_id);
-
-        // Get test details
-        const { data: tests } = await supabase
-          .from('provider_services')
-          .select('id, provider_service_name_vn, discounted_price, canonical_service_id')
-          .in('id', componentIds);
-
-        // Get canonical test names
-        const canonicalIds = tests
-          .map(t => t.canonical_service_id)
-          .filter(Boolean);
-
-        let canonicalTests = {};
-        if (canonicalIds.length > 0) {
-          const { data: canonicalData } = await supabase
-            .from('provider_services')
-            .select('id, provider_service_name_vn, discounted_price')
-            .in('id', canonicalIds);
-
-          canonicalData?.forEach(test => {
-            canonicalTests[test.id] = test;
-          });
-        }
-
-        // Map to component structure
-        components = tests.map(test => {
-          const canonicalTest = canonicalTests[test.canonical_service_id];
-          return {
-            component: {
-              id: test.id,
-              provider_service_name_vn: test.provider_service_name_vn,
-              discounted_price: test.discounted_price,
-              display_name: canonicalTest?.provider_service_name_vn || test.provider_service_name_vn,
-              display_price: canonicalTest?.discounted_price || test.discounted_price
-            }
-          };
-        });
-      }
+    if (!service) {
+      return res.status(404).json({ success: false, error: 'Service not found' });
     }
 
-    res.json({
-      success: true,
-      data: {
-        ...service,
-        branches_available: branchCount || 0,
-        components
-      }
-    });
+    // Get immediate children (components) using parent_service_id
+    const { data: children, error: childrenError } = await supabase
+      .from('provider_services')
+      .select(`
+        id,
+        provider_service_name_vn,
+        short_description,
+        discounted_price,
+        original_price,
+        service_type,
+        service_category,
+        is_bookable,
+        display_order
+      `)
+      .eq('parent_service_id', id)
+      .eq('status', 'active')
+      .order('display_order')
+      .order('id');
+
+    if (childrenError) throw childrenError;
+
+    // Format response (backward compatible with old 'components' structure)
+    const response = {
+      ...service,
+      components: (children || []).map(child => ({
+        component: {
+          ...child,
+          display_name: child.provider_service_name_vn,
+          display_price: child.discounted_price || child.original_price
+        }
+      }))
+    };
+
+    res.json({ success: true, data: response });
 
   } catch (error) {
-    console.error('Service detail error:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    console.error('Error fetching service:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// GET /api/services/:id/children - Get immediate children only
+app.get('/api/services/:id/children', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data, error } = await supabase
+      .from('provider_services')
+      .select(`
+        id,
+        provider_service_name_vn,
+        short_description,
+        full_description,
+        original_price,
+        discounted_price,
+        service_type,
+        service_category,
+        depth_level,
+        is_bookable,
+        suitable_for,
+        key_benefits,
+        target_age_group,
+        display_order
+      `)
+      .eq('parent_service_id', id)
+      .eq('status', 'active')
+      .order('display_order')
+      .order('id');
+
+    if (error) throw error;
+
+    res.json({ success: true, data: data || [] });
+
+  } catch (error) {
+    console.error('Error fetching children:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
