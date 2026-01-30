@@ -512,6 +512,11 @@ app.post('/api/bookings', async (req, res) => {
       listed_price = service.discounted_price || service.original_price;
     }
 
+    // Override listed_price if a tier was selected
+    if (req.body.selected_tier_price) {
+      listed_price = parseFloat(req.body.selected_tier_price);
+    }
+
     let discount_amount = 0;
 
     if (promo_code) {
