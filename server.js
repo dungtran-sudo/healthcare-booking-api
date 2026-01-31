@@ -32,17 +32,78 @@ const supabase = createClient(
 // SEARCH ENDPOINTS
 // ============================================
 
-// Search services by keyword + filters
+// Calculate relevance score for a service
+function calculateRelevance(service, queryNorm, queryWords) {
+  let score = 0;
+  const name = normalizeVi(service.provider_service_name_vn || '');
+  const keywords = (service.keywords || '').toLowerCase();
+  const description = normalizeVi(service.short_description || '');
+
+  // Exact name match: highest score
+  if (name === queryNorm) {
+    score += 1000;
+  }
+  // Name starts with query
+  else if (name.startsWith(queryNorm)) {
+    score += 500;
+  }
+  // Name contains full query
+  else if (name.includes(queryNorm)) {
+    score += 300;
+  }
+
+  // Word matching in name
+  let nameWordMatches = 0;
+  for (const word of queryWords) {
+    if (name.includes(word)) {
+      nameWordMatches++;
+      score += 50;
+    }
+  }
+  // Bonus for matching all words
+  if (nameWordMatches === queryWords.length && queryWords.length > 1) {
+    score += 100;
+  }
+
+  // Word matching in keywords
+  for (const word of queryWords) {
+    if (keywords.includes(word)) {
+      score += 20;
+    }
+  }
+
+  // Word matching in description
+  for (const word of queryWords) {
+    if (description.includes(word)) {
+      score += 10;
+    }
+  }
+
+  // Boost packages slightly (they're often more relevant)
+  if (service.service_type === 'package') {
+    score += 25;
+  }
+
+  // Boost services with tiered pricing (more complete data)
+  if (service.pricing_data && service.pricing_data.length > 0) {
+    score += 10;
+  }
+
+  return score;
+}
+
+// Search services by keyword + filters with relevance ranking
 app.get('/api/search/services', async (req, res) => {
   try {
-    const { 
+    const {
       q,
       district,
       city,
       provider_id,
       min_price,
       max_price,
-      service_type
+      service_type,
+      limit = 200
     } = req.query;
 
     let query = supabase
@@ -59,14 +120,18 @@ app.get('/api/search/services', async (req, res) => {
       .eq('is_bookable', true)
       .is('deleted_at', null);
 
-    // Text search
-    if (q) {
-      const qNorm = normalizeVi(q);
-      const searchWords = qNorm.split(' ').filter(w => w.length >= 2);
+    const queryNorm = q ? normalizeVi(q) : '';
+    const queryWords = queryNorm.split(' ').filter(w => w.length >= 2);
 
-      searchWords.forEach(word => {
-        query = query.ilike('keywords', `%${word}%`);
-      });
+    // Text search - use OR logic for broader results, then rank
+    if (q && queryWords.length > 0) {
+      // Search in both keywords and name for better coverage
+      // Use .or() for flexible matching
+      const searchConditions = queryWords.map(word =>
+        `keywords.ilike.%${word}%,provider_service_name_vn.ilike.%${word}%`
+      ).join(',');
+
+      query = query.or(searchConditions);
     }
 
     // Provider filter
@@ -87,48 +152,211 @@ app.get('/api/search/services', async (req, res) => {
       query = query.lte('discounted_price', max_price);
     }
 
-    const { data: services, error } = await query.limit(200);
+    const { data: services, error } = await query.limit(500); // Get more, then rank
 
     if (error) throw error;
 
     // If district/city filter, get branches
-    let filteredServices = services;
-    
+    let filteredServices = services || [];
+
     if (district || city) {
-      const serviceIds = services.map(s => s.id);
-      
-      const { data: branchServices } = await supabase
-        .from('branch_services')
-        .select(`
-          provider_service_id,
-          branches!inner (
-            district,
-            city
-          )
-        `)
-        .in('provider_service_id', serviceIds)
-        .eq('is_available', true);
+      const serviceIds = filteredServices.map(s => s.id);
 
-      const availableServiceIds = new Set();
-      branchServices?.forEach(bs => {
-        const matchDistrict = !district || bs.branches.district === district;
-        const matchCity = !city || bs.branches.city === city;
-        if (matchDistrict && matchCity) {
-          availableServiceIds.add(bs.provider_service_id);
-        }
-      });
+      if (serviceIds.length > 0) {
+        const { data: branchServices } = await supabase
+          .from('branch_services')
+          .select(`
+            provider_service_id,
+            branches!inner (
+              district,
+              city
+            )
+          `)
+          .in('provider_service_id', serviceIds)
+          .eq('is_available', true);
 
-      filteredServices = services.filter(s => availableServiceIds.has(s.id));
+        const availableServiceIds = new Set();
+        branchServices?.forEach(bs => {
+          const matchDistrict = !district ||
+            normalizeVi(bs.branches.district || '').includes(normalizeVi(district));
+          const matchCity = !city ||
+            normalizeVi(bs.branches.city || '').includes(normalizeVi(city));
+          if (matchDistrict && matchCity) {
+            availableServiceIds.add(bs.provider_service_id);
+          }
+        });
+
+        filteredServices = filteredServices.filter(s => availableServiceIds.has(s.id));
+      }
     }
+
+    // Calculate relevance scores and sort
+    if (q) {
+      filteredServices = filteredServices.map(service => ({
+        ...service,
+        _relevance: calculateRelevance(service, queryNorm, queryWords)
+      }));
+
+      // Sort by relevance (highest first)
+      filteredServices.sort((a, b) => b._relevance - a._relevance);
+
+      // Remove zero-relevance results if we have enough good matches
+      const goodMatches = filteredServices.filter(s => s._relevance > 0);
+      if (goodMatches.length >= 10) {
+        filteredServices = goodMatches;
+      }
+    }
+
+    // Apply limit
+    filteredServices = filteredServices.slice(0, parseInt(limit));
 
     res.json({
       success: true,
       data: filteredServices,
-      total: filteredServices.length
+      total: filteredServices.length,
+      query: q || null
     });
 
   } catch (error) {
     console.error('Search services error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Search suggestions (autocomplete)
+app.get('/api/search/suggestions', async (req, res) => {
+  try {
+    const { q } = req.query;
+
+    if (!q || q.length < 2) {
+      return res.json({ success: true, data: [] });
+    }
+
+    const queryNorm = normalizeVi(q);
+
+    // Get services that start with or contain the query
+    const { data: services, error } = await supabase
+      .from('provider_services')
+      .select(`
+        id,
+        provider_service_name_vn,
+        service_type,
+        service_category,
+        discounted_price,
+        providers:provider_id (brand_name_vn)
+      `)
+      .eq('status', 'active')
+      .eq('is_bookable', true)
+      .is('deleted_at', null)
+      .or(`provider_service_name_vn.ilike.${q}%,provider_service_name_vn.ilike.%${q}%,keywords.ilike.%${queryNorm}%`)
+      .limit(15);
+
+    if (error) throw error;
+
+    // Deduplicate by name and sort by relevance
+    const seen = new Set();
+    const suggestions = [];
+
+    for (const service of services || []) {
+      const name = service.provider_service_name_vn;
+      if (!seen.has(name)) {
+        seen.add(name);
+        suggestions.push({
+          id: service.id,
+          name: name,
+          type: service.service_type,
+          category: service.service_category,
+          provider: service.providers?.brand_name_vn || null,
+          price: service.discounted_price || null
+        });
+      }
+    }
+
+    // Sort: exact prefix matches first, then by type (packages first)
+    suggestions.sort((a, b) => {
+      const aStarts = normalizeVi(a.name).startsWith(queryNorm);
+      const bStarts = normalizeVi(b.name).startsWith(queryNorm);
+      if (aStarts && !bStarts) return -1;
+      if (!aStarts && bStarts) return 1;
+      // Packages first
+      if (a.type === 'package' && b.type !== 'package') return -1;
+      if (a.type !== 'package' && b.type === 'package') return 1;
+      return a.name.length - b.name.length; // Shorter names first
+    });
+
+    res.json({
+      success: true,
+      data: suggestions.slice(0, 8)
+    });
+
+  } catch (error) {
+    console.error('Search suggestions error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Popular services (for empty search state)
+app.get('/api/search/popular', async (req, res) => {
+  try {
+    // Get popular packages (root-level packages are typically what users search for)
+    const { data: packages, error: pkgError } = await supabase
+      .from('provider_services')
+      .select(`
+        id,
+        provider_service_name_vn,
+        service_type,
+        service_category,
+        discounted_price,
+        providers:provider_id (brand_name_vn)
+      `)
+      .eq('status', 'active')
+      .eq('is_bookable', true)
+      .eq('service_type', 'package')
+      .is('parent_service_id', null)
+      .is('deleted_at', null)
+      .not('discounted_price', 'is', null)
+      .order('discounted_price', { ascending: true })
+      .limit(6);
+
+    if (pkgError) throw pkgError;
+
+    // If not enough packages, also get some atomic services
+    let popularServices = packages || [];
+
+    if (popularServices.length < 6) {
+      const { data: atomics } = await supabase
+        .from('provider_services')
+        .select(`
+          id,
+          provider_service_name_vn,
+          service_type,
+          service_category,
+          discounted_price,
+          providers:provider_id (brand_name_vn)
+        `)
+        .eq('status', 'active')
+        .eq('is_bookable', true)
+        .eq('service_type', 'atomic')
+        .is('deleted_at', null)
+        .not('discounted_price', 'is', null)
+        .limit(6 - popularServices.length);
+
+      popularServices = [...popularServices, ...(atomics || [])];
+    }
+
+    res.json({
+      success: true,
+      data: popularServices
+    });
+
+  } catch (error) {
+    console.error('Popular services error:', error);
     res.status(500).json({
       success: false,
       error: error.message
