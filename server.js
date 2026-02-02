@@ -878,6 +878,465 @@ app.get('/api/bookings/:reference', async (req, res) => {
 });
 
 // ============================================
+// SMART SEARCH / CANONICAL SERVICES ENDPOINTS
+// ============================================
+
+// Get all clinical pathways
+app.get('/api/clinical-pathways', async (req, res) => {
+  try {
+    const { data: pathways, error } = await supabase
+      .from('clinical_pathways')
+      .select('*')
+      .order('display_order');
+
+    if (error) throw error;
+
+    // For each pathway, fetch the canonical service details
+    for (const pathway of pathways || []) {
+      if (pathway.required_canonical_ids?.length > 0) {
+        const { data: required } = await supabase
+          .from('canonical_services')
+          .select('id, code, name_vn, name_en, category')
+          .in('id', pathway.required_canonical_ids);
+        pathway.required_services = required || [];
+      } else {
+        pathway.required_services = [];
+      }
+
+      if (pathway.recommended_canonical_ids?.length > 0) {
+        const { data: recommended } = await supabase
+          .from('canonical_services')
+          .select('id, code, name_vn, name_en, category')
+          .in('id', pathway.recommended_canonical_ids);
+        pathway.recommended_services = recommended || [];
+      } else {
+        pathway.recommended_services = [];
+      }
+    }
+
+    res.json({
+      success: true,
+      data: pathways || []
+    });
+
+  } catch (error) {
+    console.error('Clinical pathways error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Get single clinical pathway
+app.get('/api/clinical-pathways/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data: pathway, error } = await supabase
+      .from('clinical_pathways')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (error) throw error;
+    if (!pathway) {
+      return res.status(404).json({ success: false, error: 'Pathway not found' });
+    }
+
+    // Fetch canonical service details
+    if (pathway.required_canonical_ids?.length > 0) {
+      const { data: required } = await supabase
+        .from('canonical_services')
+        .select('*')
+        .in('id', pathway.required_canonical_ids);
+      pathway.required_services = required || [];
+    } else {
+      pathway.required_services = [];
+    }
+
+    if (pathway.recommended_canonical_ids?.length > 0) {
+      const { data: recommended } = await supabase
+        .from('canonical_services')
+        .select('*')
+        .in('id', pathway.recommended_canonical_ids);
+      pathway.recommended_services = recommended || [];
+    } else {
+      pathway.recommended_services = [];
+    }
+
+    res.json({ success: true, data: pathway });
+
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get all canonical services
+app.get('/api/canonical-services', async (req, res) => {
+  try {
+    const { category, search } = req.query;
+
+    let query = supabase
+      .from('canonical_services')
+      .select('*')
+      .order('display_order');
+
+    if (category) {
+      query = query.eq('category', category);
+    }
+
+    if (search) {
+      const searchNorm = normalizeVi(search);
+      query = query.or(`name_vn.ilike.%${search}%,name_en.ilike.%${search}%,code.ilike.%${search}%`);
+    }
+
+    const { data, error } = await query;
+
+    if (error) throw error;
+
+    res.json({
+      success: true,
+      data: data || []
+    });
+
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get providers offering a canonical service
+app.get('/api/canonical-services/:id/providers', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Get the canonical service
+    const { data: canonical, error: canonicalError } = await supabase
+      .from('canonical_services')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (canonicalError) throw canonicalError;
+    if (!canonical) {
+      return res.status(404).json({ success: false, error: 'Canonical service not found' });
+    }
+
+    // Get all provider services mapped to this canonical service
+    const { data: mappings, error: mappingsError } = await supabase
+      .from('provider_service_mappings')
+      .select(`
+        confidence_score,
+        provider_services!inner (
+          id,
+          provider_service_name_vn,
+          discounted_price,
+          original_price,
+          service_type,
+          providers:provider_id (
+            id,
+            brand_name_vn,
+            logo_url
+          )
+        )
+      `)
+      .eq('canonical_service_id', id);
+
+    if (mappingsError) throw mappingsError;
+
+    // Format response
+    const providers = (mappings || []).map(m => ({
+      provider_service_id: m.provider_services.id,
+      provider_service_name: m.provider_services.provider_service_name_vn,
+      price: m.provider_services.discounted_price || m.provider_services.original_price,
+      service_type: m.provider_services.service_type,
+      provider: m.provider_services.providers,
+      confidence_score: m.confidence_score
+    }));
+
+    // Sort by price
+    providers.sort((a, b) => (a.price || 999999999) - (b.price || 999999999));
+
+    res.json({
+      success: true,
+      canonical_service: canonical,
+      providers
+    });
+
+  } catch (error) {
+    console.error('Canonical providers error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Smart Search - Find best packages/services for a clinical need
+app.post('/api/smart-search', async (req, res) => {
+  try {
+    const {
+      query,
+      pathway_id,
+      canonical_ids,
+      patient_age,
+      patient_gender,
+      city,
+      district
+    } = req.body;
+
+    let requiredCanonicalIds = [];
+    let recommendedCanonicalIds = [];
+    let suggestedPathway = null;
+
+    // Case 1: Pathway ID provided directly
+    if (pathway_id) {
+      const { data: pathway } = await supabase
+        .from('clinical_pathways')
+        .select('*')
+        .eq('id', pathway_id)
+        .single();
+
+      if (pathway) {
+        suggestedPathway = pathway;
+        requiredCanonicalIds = pathway.required_canonical_ids || [];
+        recommendedCanonicalIds = pathway.recommended_canonical_ids || [];
+      }
+    }
+    // Case 2: Specific canonical IDs provided
+    else if (canonical_ids && canonical_ids.length > 0) {
+      requiredCanonicalIds = canonical_ids;
+    }
+    // Case 3: Free-text query - find matching pathway
+    else if (query) {
+      const queryNorm = normalizeVi(query);
+      const queryWords = queryNorm.split(' ').filter(w => w.length >= 2);
+
+      // Search pathways by keywords
+      const { data: pathways } = await supabase
+        .from('clinical_pathways')
+        .select('*')
+        .order('is_common', { ascending: false });
+
+      // Score pathways based on keyword matches
+      let bestPathway = null;
+      let bestScore = 0;
+
+      for (const pathway of pathways || []) {
+        let score = 0;
+        const keywords = pathway.trigger_keywords || [];
+        const symptoms = pathway.trigger_symptoms || [];
+
+        for (const kw of keywords) {
+          if (queryNorm.includes(normalizeVi(kw))) {
+            score += 10;
+          }
+        }
+
+        for (const word of queryWords) {
+          for (const kw of keywords) {
+            if (normalizeVi(kw).includes(word)) {
+              score += 3;
+            }
+          }
+          for (const sym of symptoms) {
+            if (normalizeVi(sym).includes(word)) {
+              score += 2;
+            }
+          }
+        }
+
+        // Age/gender filtering
+        if (patient_age) {
+          if (pathway.target_age_min && patient_age < pathway.target_age_min) {
+            score -= 5;
+          }
+          if (pathway.target_age_max && patient_age > pathway.target_age_max) {
+            score -= 5;
+          }
+        }
+
+        if (patient_gender && pathway.target_gender && pathway.target_gender !== 'all') {
+          if (pathway.target_gender !== patient_gender) {
+            score -= 10;
+          }
+        }
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestPathway = pathway;
+        }
+      }
+
+      if (bestPathway && bestScore > 0) {
+        suggestedPathway = bestPathway;
+        requiredCanonicalIds = bestPathway.required_canonical_ids || [];
+        recommendedCanonicalIds = bestPathway.recommended_canonical_ids || [];
+      }
+    }
+
+    // If no canonical IDs found, return empty
+    if (requiredCanonicalIds.length === 0 && recommendedCanonicalIds.length === 0) {
+      return res.json({
+        success: true,
+        suggested_pathway: null,
+        results: {
+          complete_packages: [],
+          partial_packages: [],
+          individual_options: null
+        }
+      });
+    }
+
+    // Get canonical service details
+    const allCanonicalIds = [...new Set([...requiredCanonicalIds, ...recommendedCanonicalIds])];
+    const { data: canonicalServices } = await supabase
+      .from('canonical_services')
+      .select('*')
+      .in('id', allCanonicalIds);
+
+    // Find provider services that cover these canonical services
+    const { data: mappings } = await supabase
+      .from('provider_service_mappings')
+      .select(`
+        canonical_service_id,
+        confidence_score,
+        provider_services!inner (
+          id,
+          provider_id,
+          provider_service_name_vn,
+          service_type,
+          discounted_price,
+          original_price,
+          pricing_data,
+          providers:provider_id (
+            id,
+            brand_name_vn,
+            logo_url
+          )
+        )
+      `)
+      .in('canonical_service_id', allCanonicalIds);
+
+    // Group by provider_service_id to see coverage
+    const serviceMap = new Map();
+
+    for (const m of mappings || []) {
+      const psId = m.provider_services.id;
+      if (!serviceMap.has(psId)) {
+        serviceMap.set(psId, {
+          ...m.provider_services,
+          matched_canonical_ids: [],
+          total_confidence: 0
+        });
+      }
+      serviceMap.get(psId).matched_canonical_ids.push(m.canonical_service_id);
+      serviceMap.get(psId).total_confidence += m.confidence_score;
+    }
+
+    // Calculate coverage scores
+    const services = Array.from(serviceMap.values()).map(s => {
+      const requiredMatched = s.matched_canonical_ids.filter(id => requiredCanonicalIds.includes(id));
+      const recommendedMatched = s.matched_canonical_ids.filter(id => recommendedCanonicalIds.includes(id));
+
+      const requiredCoverage = requiredCanonicalIds.length > 0
+        ? requiredMatched.length / requiredCanonicalIds.length
+        : 0;
+
+      const totalCoverage = allCanonicalIds.length > 0
+        ? s.matched_canonical_ids.length / allCanonicalIds.length
+        : 0;
+
+      return {
+        ...s,
+        required_coverage: requiredCoverage,
+        total_coverage: totalCoverage,
+        required_matched: requiredMatched,
+        recommended_matched: recommendedMatched,
+        price: s.discounted_price || s.original_price || 0
+      };
+    });
+
+    // Separate into complete packages, partial packages, and atomics
+    const completePackages = services
+      .filter(s => s.service_type === 'package' && s.required_coverage >= 0.99)
+      .sort((a, b) => b.total_coverage - a.total_coverage || a.price - b.price);
+
+    const partialPackages = services
+      .filter(s => s.service_type === 'package' && s.required_coverage >= 0.5 && s.required_coverage < 0.99)
+      .sort((a, b) => b.required_coverage - a.required_coverage || a.price - b.price);
+
+    // For individual options, find cheapest atomic for each required canonical
+    const individualOptions = [];
+    const atomicServices = services.filter(s => s.service_type === 'atomic');
+
+    for (const canonicalId of requiredCanonicalIds) {
+      const matching = atomicServices
+        .filter(s => s.matched_canonical_ids.includes(canonicalId))
+        .sort((a, b) => a.price - b.price);
+
+      if (matching.length > 0) {
+        const cheapest = matching[0];
+        individualOptions.push({
+          canonical_id: canonicalId,
+          canonical_service: canonicalServices?.find(cs => cs.id === canonicalId),
+          provider_service: cheapest,
+          price: cheapest.price
+        });
+      }
+    }
+
+    const individualTotal = individualOptions.reduce((sum, opt) => sum + opt.price, 0);
+
+    // Enrich pathway with service details
+    if (suggestedPathway) {
+      suggestedPathway.required_services = canonicalServices?.filter(
+        cs => requiredCanonicalIds.includes(cs.id)
+      ) || [];
+      suggestedPathway.recommended_services = canonicalServices?.filter(
+        cs => recommendedCanonicalIds.includes(cs.id)
+      ) || [];
+    }
+
+    res.json({
+      success: true,
+      suggested_pathway: suggestedPathway,
+      canonical_services: canonicalServices,
+      results: {
+        complete_packages: completePackages.slice(0, 5).map(p => ({
+          provider_service_id: p.id,
+          name: p.provider_service_name_vn,
+          provider: p.providers,
+          coverage_score: p.total_coverage,
+          price: p.price,
+          pricing_data: p.pricing_data,
+          matched_required: p.required_matched.length,
+          matched_recommended: p.recommended_matched.length,
+          total_required: requiredCanonicalIds.length,
+          total_recommended: recommendedCanonicalIds.length
+        })),
+        partial_packages: partialPackages.slice(0, 5).map(p => ({
+          provider_service_id: p.id,
+          name: p.provider_service_name_vn,
+          provider: p.providers,
+          coverage_score: p.required_coverage,
+          price: p.price,
+          missing_canonical_ids: requiredCanonicalIds.filter(id => !p.required_matched.includes(id))
+        })),
+        individual_options: individualOptions.length > 0 ? {
+          total_price: individualTotal,
+          services: individualOptions
+        } : null
+      }
+    });
+
+  } catch (error) {
+    console.error('Smart search error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// ============================================
 // REPORTS ENDPOINTS
 // ============================================
 
@@ -931,6 +1390,80 @@ app.get('/api/reports/bookings', async (req, res) => {
       error: error.message
     });
   }
+});
+
+// ============================================
+// DATABASE SETUP VERIFICATION
+// ============================================
+
+// Check if canonical tables exist and have data
+app.get('/api/setup/status', async (req, res) => {
+  const status = {
+    tables: {},
+    ready: true,
+    missing_steps: []
+  };
+
+  // Check canonical_services table
+  try {
+    const { data, error } = await supabase
+      .from('canonical_services')
+      .select('id', { count: 'exact', head: true });
+
+    if (error) throw error;
+    status.tables.canonical_services = { exists: true, count: data?.length || 0 };
+  } catch (e) {
+    status.tables.canonical_services = { exists: false, error: e.message };
+    status.ready = false;
+    status.missing_steps.push('Create canonical_services table');
+  }
+
+  // Check clinical_pathways table
+  try {
+    const { data, error } = await supabase
+      .from('clinical_pathways')
+      .select('id', { count: 'exact', head: true });
+
+    if (error) throw error;
+    status.tables.clinical_pathways = { exists: true, count: data?.length || 0 };
+  } catch (e) {
+    status.tables.clinical_pathways = { exists: false, error: e.message };
+    status.ready = false;
+    status.missing_steps.push('Create clinical_pathways table');
+  }
+
+  // Check provider_service_mappings table
+  try {
+    const { data, error } = await supabase
+      .from('provider_service_mappings')
+      .select('id', { count: 'exact', head: true });
+
+    if (error) throw error;
+    status.tables.provider_service_mappings = { exists: true, count: data?.length || 0 };
+  } catch (e) {
+    status.tables.provider_service_mappings = { exists: false, error: e.message };
+    status.ready = false;
+    status.missing_steps.push('Create provider_service_mappings table');
+  }
+
+  // Check if tables have data
+  if (status.tables.canonical_services?.exists && status.tables.canonical_services?.count === 0) {
+    status.missing_steps.push('Seed canonical_services with data');
+  }
+  if (status.tables.clinical_pathways?.exists && status.tables.clinical_pathways?.count === 0) {
+    status.missing_steps.push('Seed clinical_pathways with data');
+  }
+
+  res.json({
+    success: true,
+    status,
+    setup_instructions: !status.ready ? {
+      step1: 'Run SQL in Supabase SQL Editor: migrations/001_create_canonical_tables.sql',
+      step2: 'Run: python3 scripts/seed_canonical_services.py',
+      step3: 'Run: python3 scripts/seed_clinical_pathways.py',
+      step4: 'Run: python3 scripts/auto_map_services.py'
+    } : null
+  });
 });
 
 // Health check
