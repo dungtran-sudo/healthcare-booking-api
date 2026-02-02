@@ -1124,23 +1124,51 @@ app.post('/api/smart-search', async (req, res) => {
         const keywords = pathway.trigger_keywords || [];
         const symptoms = pathway.trigger_symptoms || [];
 
+        // HIGHEST PRIORITY: Exact keyword match (query contains full keyword)
         for (const kw of keywords) {
-          if (queryNorm.includes(normalizeVi(kw))) {
-            score += 10;
+          const kwNorm = normalizeVi(kw);
+          if (queryNorm === kwNorm) {
+            // Exact match - highest score
+            score += 100;
+          } else if (queryNorm.includes(kwNorm)) {
+            // Query contains the keyword phrase
+            score += 50;
           }
         }
 
+        // MEDIUM PRIORITY: Keyword contains full query (e.g., query="tiểu đường", keyword="tầm soát tiểu đường")
+        for (const kw of keywords) {
+          const kwNorm = normalizeVi(kw);
+          if (kwNorm.includes(queryNorm) && queryNorm.length >= 5) {
+            score += 30;
+          }
+        }
+
+        // LOW PRIORITY: Word-level matching (only if no exact matches found)
+        // Require at least 2 words to match OR one word with 4+ chars
+        let wordMatchCount = 0;
         for (const word of queryWords) {
+          if (word.length < 3) continue; // Skip very short words
+
           for (const kw of keywords) {
-            if (normalizeVi(kw).includes(word)) {
-              score += 3;
+            const kwNorm = normalizeVi(kw);
+            // Only match if word is a complete word in keyword (not partial)
+            const kwWords = kwNorm.split(' ');
+            if (kwWords.includes(word)) {
+              wordMatchCount++;
+              score += 5;
             }
           }
           for (const sym of symptoms) {
-            if (normalizeVi(sym).includes(word)) {
+            if (normalizeVi(sym).includes(word) && word.length >= 4) {
               score += 2;
             }
           }
+        }
+
+        // Bonus for matching multiple words
+        if (wordMatchCount >= 2) {
+          score += 15;
         }
 
         // Age/gender filtering
@@ -1165,7 +1193,8 @@ app.post('/api/smart-search', async (req, res) => {
         }
       }
 
-      if (bestPathway && bestScore > 0) {
+      // Require minimum score of 10 to avoid false positives from weak partial matches
+      if (bestPathway && bestScore >= 10) {
         suggestedPathway = bestPathway;
         requiredCanonicalIds = bestPathway.required_canonical_ids || [];
         recommendedCanonicalIds = bestPathway.recommended_canonical_ids || [];
