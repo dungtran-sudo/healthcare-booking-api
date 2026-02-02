@@ -1145,10 +1145,10 @@ app.post('/api/smart-search', async (req, res) => {
         }
 
         // LOW PRIORITY: Word-level matching (only if no exact matches found)
-        // Require at least 2 words to match OR one word with 4+ chars
+        // Require words to be at least 4 chars to avoid false matches like "đau" matching "đau khớp"
         let wordMatchCount = 0;
         for (const word of queryWords) {
-          if (word.length < 3) continue; // Skip very short words
+          if (word.length < 4) continue; // Skip short words (e.g., "dau", "gan")
 
           for (const kw of keywords) {
             const kwNorm = normalizeVi(kw);
