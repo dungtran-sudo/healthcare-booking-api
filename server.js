@@ -2031,6 +2031,141 @@ app.post('/api/admin/fix-keywords', async (req, res) => {
 });
 
 // ============================================
+// DATA MIGRATION: Insert package components
+// ============================================
+app.post('/api/admin/insert-package-components', async (req, res) => {
+  try {
+    // Package components data
+    const componentsData = [
+      // Package 23 - Đái tháo đường Cơ bản
+      { package_id: 23, name: 'Định lượng Glucose [Máu]', price: 30000, description: 'Xét nghiệm máu đo lượng đường trong máu sau khi không ăn hoặc uống bất cứ thứ gì ngoại trừ nước trong ít nhất 8 giờ.' },
+      { package_id: 23, name: 'Định lượng HbA1c [Máu]', price: 153000, description: 'Xét nghiệm HbA1c đo mức đường huyết trung bình trong 2 đến 3 tháng qua.' },
+      { package_id: 23, name: 'Ước Lượng Đường huyết Trung Bình (eAG)', price: null, description: 'Chỉ số eAG cung cấp mức đường huyết trung bình trong 2 đến 3 tháng qua.' },
+
+      // Package 19 - Viêm gan B, C, A Cơ bản
+      { package_id: 19, name: 'HBsAg miễn dịch tự động', price: 127000, description: 'Phát hiện kháng nguyên HBsAg của virus Viêm gan B.' },
+      { package_id: 19, name: 'HBsAb định lượng', price: 144000, description: 'Phát hiện kháng thể HBsAb khi cơ thể từng nhiễm virus viêm gan B.' },
+      { package_id: 19, name: 'HCV Ab miễn dịch tự động', price: 213000, description: 'Xét nghiệm kháng thể HCV Ab kiểm tra đã từng bị nhiễm Viêm gan C hay chưa.' },
+
+      // Package 21 - Chức năng thận Cơ bản
+      { package_id: 21, name: 'Định lượng Creatinin [máu]', price: null, description: 'Creatinine là sản phẩm thải được tạo ra bởi cơ bắp, dấu hiệu quan trọng để đánh giá chức năng thận.' },
+      { package_id: 21, name: 'Độ Lọc Cầu Thận Ước Tính (eGFR)', price: null, description: 'Chỉ số eGFR ước tính mức độ lọc các chất thải của thận.' },
+      { package_id: 21, name: 'Định lượng Urê máu [Máu]', price: 30000, description: 'Kiểm tra nồng độ urê huyết thanh giúp chẩn đoán và theo dõi chức năng thận.' },
+      { package_id: 21, name: 'Tổng phân tích nước tiểu (Bằng máy tự động)', price: 35000, description: 'Xét nghiệm nước tiểu định kỳ giúp kiểm tra nhiễm trùng đường tiết niệu, bệnh thận và tiểu đường.' },
+      { package_id: 21, name: 'Xét nghiệm tế bào trong nước tiểu (bằng máy tự động)', price: 63000, description: 'Cặn lắng nước tiểu đo hồng cầu, tiểu cầu, bạch cầu, trụ niệu...' },
+
+      // Package 16 - Sức khỏe sinh sản Nữ Cơ bản
+      { package_id: 16, name: 'Định lượng LH (Luteinizing Hormone) [Máu]', price: 164000, description: 'LH kích hoạt sự rụng trứng, giúp tìm nguyên nhân gây vô sinh.' },
+      { package_id: 16, name: 'Định lượng FSH (Follicular Stimulating Hormone) [Máu]', price: 164000, description: 'FSH kích thích sự phát triển và trưởng thành của nang trứng.' },
+      { package_id: 16, name: 'Định lượng Estradiol [Máu]', price: 164000, description: 'Estradiol điều hòa chu kỳ kinh nguyệt và hỗ trợ mang thai khỏe mạnh.' },
+      { package_id: 16, name: 'Định lượng Prolactin [Máu]', price: 164000, description: 'Prolactin kích thích sự phát triển của vú và sản xuất sữa.' },
+      { package_id: 16, name: 'Định lượng Progesteron [Máu]', price: 164000, description: 'Progesterone chuẩn bị tử cung cho thai kỳ.' },
+
+      // Package 18 - Sức khỏe sinh sản Nữ Nâng cao
+      { package_id: 18, name: 'Định lượng AMH (Anti-Mullerian Hormone) [Máu]', price: 797000, description: 'AMH cho biết nguồn dự trữ trứng của phụ nữ.' },
+      { package_id: 18, name: 'Định lượng LH (Luteinizing Hormone) [Máu]', price: 164000, description: 'LH kích hoạt sự rụng trứng.' },
+      { package_id: 18, name: 'Định lượng FSH (Follicular Stimulating Hormone) [Máu]', price: 164000, description: 'FSH kích thích sự phát triển nang trứng.' },
+      { package_id: 18, name: 'Định lượng Estradiol [Máu]', price: 164000, description: 'Estradiol điều hòa chu kỳ kinh nguyệt.' },
+      { package_id: 18, name: 'Định lượng Prolactin [Máu]', price: 164000, description: 'Prolactin kích thích sản xuất sữa.' },
+      { package_id: 18, name: 'Định lượng Progesteron [Máu]', price: 164000, description: 'Progesterone chuẩn bị tử cung cho thai kỳ.' },
+
+      // Package 45 - Sốt xuất huyết
+      { package_id: 45, name: 'Tổng phân tích tế bào máu ngoại vi (bằng máy đếm laser)', price: 98000, description: 'Xét nghiệm CBC đánh giá hồng cầu, bạch cầu, tiểu cầu.' },
+      { package_id: 45, name: 'Dengue virus NS1Ag test nhanh', price: 228000, description: 'Phát hiện kháng nguyên Dengue NS1 trong 5 ngày đầu sau triệu chứng.' },
+      { package_id: 45, name: 'Dengue virus IgM/IgG test nhanh', price: 230000, description: 'Phát hiện kháng thể IgG và IgM của vi-rút Dengue.' },
+      { package_id: 45, name: 'Xét nghiệm tế bào trong nước tiểu (bằng máy tự động)', price: 63000, description: 'Cặn lắng nước tiểu chẩn đoán bệnh lý về thận.' },
+      { package_id: 45, name: 'Tổng phân tích nước tiểu (Bằng máy tự động)', price: 35000, description: 'Xét nghiệm nước tiểu định kỳ.' },
+
+      // Package 1778 - Viêm khớp Cơ bản
+      { package_id: 1778, name: 'Định lượng Acid Uric [Máu]', price: 39000, description: 'Đo lượng axit uric trong máu, chẩn đoán bệnh gút.' },
+      { package_id: 1778, name: 'Xét nghiệm tế bào trong nước tiểu (bằng máy tự động)', price: 63000, description: 'Phân tích hồng cầu, bạch cầu, protein trong nước tiểu.' },
+      { package_id: 1778, name: 'Máu lắng (bằng máy tự động)', price: 41000, description: 'Tốc độ máu lắng (ESR) phát hiện tình trạng viêm.' },
+      { package_id: 1778, name: 'Tổng phân tích tế bào máu ngoại vi (bằng máy đếm laser)', price: 98000, description: 'Xét nghiệm CBC đánh giá sức khỏe tổng thể.' },
+      { package_id: 1778, name: 'Định lượng RF (Reumatoid Factor) [Máu]', price: 76000, description: 'Chẩn đoán viêm khớp dạng thấp.' },
+      { package_id: 1778, name: 'Streptococcus pyogenes ASO', price: 91000, description: 'Đo kháng thể chống lại streptolysin O.' },
+      { package_id: 1778, name: 'Định lượng CRP hs (C-Reactive Protein) [Máu]', price: 106000, description: 'Xét nghiệm CRP đánh giá nguy cơ tim mạch và viêm.' },
+
+      // Package 1779 - Viêm khớp Nâng cao
+      { package_id: 1779, name: 'Định lượng Acid Uric [Máu]', price: 39000, description: 'Đo lượng axit uric trong máu.' },
+      { package_id: 1779, name: 'Xét nghiệm tế bào trong nước tiểu (bằng máy tự động)', price: 63000, description: 'Phân tích nước tiểu.' },
+      { package_id: 1779, name: 'Máu lắng (bằng máy tự động)', price: 41000, description: 'Tốc độ máu lắng (ESR).' },
+      { package_id: 1779, name: 'Tổng phân tích tế bào máu ngoại vi (bằng máy đếm laser)', price: 98000, description: 'Xét nghiệm CBC.' },
+      { package_id: 1779, name: 'Định lượng RF (Reumatoid Factor) [Máu]', price: 76000, description: 'Chẩn đoán viêm khớp dạng thấp.' },
+      { package_id: 1779, name: 'Streptococcus pyogenes ASO', price: 91000, description: 'Đo kháng thể ASO.' },
+      { package_id: 1779, name: 'Định lượng CRP hs [Máu]', price: 106000, description: 'Xét nghiệm CRP.' },
+      { package_id: 1779, name: 'Định lượng Anti CCP [Máu]', price: 329000, description: 'Chẩn đoán viêm khớp dạng thấp.' },
+      { package_id: 1779, name: 'Kháng thể kháng nhân (anti-ANA)', price: 184000, description: 'Phát hiện bệnh tự miễn như Lupus.' },
+
+      // Package 1780 - STDs Nữ nâng cao
+      { package_id: 1780, name: 'Chlamydia Real-time PCR', price: null, description: 'Phát hiện nhiễm Chlamydia trachomatis.' },
+      { package_id: 1780, name: 'Vi nấm PCR', price: null, description: 'Phát hiện nhiễm nấm Candida.' },
+      { package_id: 1780, name: 'Treponema pallidum Real-time PCR', price: null, description: 'Phát hiện xoắn khuẩn gây giang mai.' },
+      { package_id: 1780, name: 'HSV Real-time PCR: Herpes Simplex Virus 1', price: null, description: 'Phát hiện HSV-1 gây bệnh ở miệng.' },
+      { package_id: 1780, name: 'HSV Real-time PCR: Herpes Simplex Virus 2', price: null, description: 'Phát hiện HSV-2 gây bệnh sinh dục.' },
+      { package_id: 1780, name: 'Ureaplasma parvum PCR', price: null, description: 'Phát hiện vi khuẩn Ureaplasma parvum.' },
+      { package_id: 1780, name: 'Ký sinh trùng Trichomonas vaginalis', price: null, description: 'Phát hiện trùng roi âm đạo.' },
+      { package_id: 1780, name: 'Mycoplasma genitalium PCR', price: null, description: 'Phát hiện vi khuẩn Mycoplasma genitalium.' },
+      { package_id: 1780, name: 'Mycoplasma hominis Real-time PCR', price: null, description: 'Phát hiện vi khuẩn Mycoplasma hominis.' },
+      { package_id: 1780, name: 'Neisseria gonorrhoeae Real-time PCR', price: null, description: 'Phát hiện vi khuẩn gây bệnh lậu.' },
+      { package_id: 1780, name: 'Ureaplasma urealyticum Real-time PCR', price: null, description: 'Phát hiện vi khuẩn Ureaplasma urealyticum.' },
+      { package_id: 1780, name: 'Haemophilus ducreyi PCR', price: null, description: 'Phát hiện vi khuẩn gây bệnh hạ cam.' },
+      { package_id: 1780, name: 'Gardnerella vaginalis PCR', price: null, description: 'Phát hiện vi khuẩn Gardnerella vaginalis.' },
+      { package_id: 1780, name: 'HSV 1+2 IgM miễn dịch', price: 224000, description: 'Phát hiện nhiễm virus herpes gần đây.' },
+      { package_id: 1780, name: 'HIV Ag/Ab miễn dịch tự động', price: 170000, description: 'Phát hiện cả kháng thể và kháng nguyên HIV.' },
+      { package_id: 1780, name: 'RPR - Kháng thể giang mai', price: null, description: 'Phát hiện bệnh giang mai.' },
+      { package_id: 1780, name: 'HPV genotype Real-time PCR', price: null, description: 'Phát hiện 40 type HPV gây ung thư cổ tử cung.' },
+    ];
+
+    // Get provider_id from first package
+    const { data: pkgData } = await supabase
+      .from('provider_services')
+      .select('provider_id')
+      .eq('id', 23)
+      .single();
+
+    const providerId = pkgData?.provider_id || 1;
+
+    // Insert components
+    let inserted = 0;
+    let errors = [];
+
+    for (const comp of componentsData) {
+      const { error } = await supabase
+        .from('provider_services')
+        .insert({
+          provider_id: providerId,
+          parent_service_id: comp.package_id,
+          provider_service_name_vn: comp.name,
+          short_description: comp.description,
+          discounted_price: comp.price,
+          service_type: 'atomic',
+          status: 'active',
+          is_bookable: false,
+          keywords: comp.name.toLowerCase()
+        });
+
+      if (error) {
+        errors.push({ name: comp.name, error: error.message });
+      } else {
+        inserted++;
+      }
+    }
+
+    res.json({
+      success: true,
+      total_components: componentsData.length,
+      inserted,
+      errors: errors.length,
+      error_details: errors.slice(0, 5)
+    });
+
+  } catch (error) {
+    console.error('Insert components error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ============================================
 // DATA MIGRATION: Fix missing package components
 // ============================================
 app.post('/api/admin/fix-package-components', async (req, res) => {
