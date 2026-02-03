@@ -1724,43 +1724,79 @@ app.get('/api/v2/search', async (req, res) => {
       });
     }
 
-    // Calculate relevance and build results
+    // Calculate relevance and build results with SOFT location boost
+    const cityNorm = city ? normalizeVi(city) : null;
+    const districtNorm = district ? normalizeVi(district) : null;
+
     let results = (services || []).map(service => {
       const branches = branchMap[service.id] || [];
 
-      // Filter by location if specified
-      let matchingBranches = branches;
-      if (city || district) {
-        matchingBranches = branches.filter(b => {
-          const matchCity = !city || normalizeVi(b.city || '').includes(normalizeVi(city));
-          const matchDistrict = !district || normalizeVi(b.district || '').includes(normalizeVi(district));
-          return matchCity && matchDistrict;
-        });
-      }
+      // Skip services with no branches
+      if (branches.length === 0) return null;
 
-      // Skip if no matching branches for location filter
-      if ((city || district) && matchingBranches.length === 0) {
-        return null;
-      }
+      // Categorize branches by location match
+      const matchedBranches = [];
+      const nearbyBranches = [];
+      const otherBranches = [];
 
-      // Calculate relevance score
+      branches.forEach(b => {
+        const branchDistrictNorm = normalizeVi(b.district || '');
+        const branchCityNorm = normalizeVi(b.city || '');
+
+        // Check district match
+        const districtMatch = districtNorm && branchDistrictNorm.includes(districtNorm);
+        // Check city match
+        const cityMatch = cityNorm && branchCityNorm.includes(cityNorm);
+
+        if (districtMatch) {
+          matchedBranches.push({ ...b, matchType: 'district' });
+        } else if (cityMatch) {
+          nearbyBranches.push({ ...b, matchType: 'city' });
+        } else {
+          otherBranches.push({ ...b, matchType: 'other' });
+        }
+      });
+
+      // Calculate TEXT relevance score
       const name = normalizeVi(service.provider_service_name_vn || '');
       const desc = normalizeVi(service.short_description || '');
       const keywords = (service.keywords || '').toLowerCase();
 
-      let score = 0;
-      if (name === queryNorm) score += 1000;
-      else if (name.startsWith(queryNorm)) score += 500;
-      else if (name.includes(queryNorm)) score += 300;
+      let textScore = 0;
+      if (name === queryNorm) textScore += 1000;
+      else if (name.startsWith(queryNorm)) textScore += 500;
+      else if (name.includes(queryNorm)) textScore += 300;
 
       queryWords.forEach(word => {
-        if (name.includes(word)) score += 50;
-        if (keywords.includes(word)) score += 20;
-        if (desc.includes(word)) score += 10;
+        if (name.includes(word)) textScore += 50;
+        if (keywords.includes(word)) textScore += 20;
+        if (desc.includes(word)) textScore += 10;
       });
 
-      // Get first matching branch for display
-      const primaryBranch = matchingBranches[0] || branches[0];
+      // Skip if no text relevance
+      if (textScore === 0) return null;
+
+      // Calculate LOCATION boost (soft boost, not hard filter)
+      let locationBoost = 0;
+      let locationMatch = 'none';
+
+      if (matchedBranches.length > 0) {
+        locationBoost = 500; // Strong boost for exact district match
+        locationMatch = 'district';
+      } else if (nearbyBranches.length > 0) {
+        locationBoost = 200; // Medium boost for same city
+        locationMatch = 'city';
+      }
+      // No boost if no location match, but still include in results
+
+      // Prominence boost (more branches = more prominent)
+      const prominenceBoost = Math.min(branches.length * 5, 50);
+
+      // Final score
+      const finalScore = textScore + locationBoost + prominenceBoost;
+
+      // Sort branches: matched first, then nearby, then others
+      const sortedBranches = [...matchedBranches, ...nearbyBranches, ...otherBranches];
 
       return {
         id: service.id,
@@ -1773,27 +1809,36 @@ app.get('/api/v2/search', async (req, res) => {
           id: service.providers?.id,
           name: service.providers?.brand_name_vn
         },
-        location: primaryBranch ? {
-          branch_id: primaryBranch.id,
-          branch_name: primaryBranch.branch_name_vn,
-          district: primaryBranch.district,
-          city: primaryBranch.city,
-          address: primaryBranch.address
+        // Location matching info
+        location_match: locationMatch,
+        matched_branches: matchedBranches.slice(0, 5).map(b => ({
+          id: b.id,
+          name: b.branch_name_vn,
+          district: b.district,
+          city: b.city,
+          address: b.address
+        })),
+        matched_branch_count: matchedBranches.length,
+        nearby_branch_count: nearbyBranches.length,
+        other_branch_count: otherBranches.length,
+        total_branch_count: branches.length,
+        // Primary branch for display (first matched, or first overall)
+        primary_branch: sortedBranches[0] ? {
+          id: sortedBranches[0].id,
+          name: sortedBranches[0].branch_name_vn,
+          district: sortedBranches[0].district,
+          city: sortedBranches[0].city,
+          address: sortedBranches[0].address
         } : null,
-        branch_count: matchingBranches.length || branches.length,
         components: service.service_type === 'package' ? (componentMap[service.id] || []) : null,
-        _score: score
+        _score: finalScore,
+        _textScore: textScore,
+        _locationBoost: locationBoost
       };
     }).filter(Boolean);
 
-    // Sort by relevance
+    // Sort by final score (includes location boost)
     results.sort((a, b) => b._score - a._score);
-
-    // Filter out low relevance
-    const goodResults = results.filter(r => r._score > 0);
-    if (goodResults.length >= 5) {
-      results = goodResults;
-    }
 
     // Split into packages and services
     const packages = results
@@ -1803,6 +1848,10 @@ app.get('/api/v2/search', async (req, res) => {
     const individualServices = results
       .filter(r => r.type === 'atomic')
       .slice(0, parseInt(limit));
+
+    // Check if location was requested but no exact matches found
+    const hasLocationFilter = !!(city || district);
+    const hasExactMatches = results.some(r => r.location_match === 'district');
 
     res.json({
       success: true,
@@ -1814,7 +1863,15 @@ app.get('/api/v2/search', async (req, res) => {
         serviceQuery,
         city: city || null,
         district: district || null
-      }
+      },
+      location_info: hasLocationFilter ? {
+        requested_district: district,
+        requested_city: city,
+        has_exact_matches: hasExactMatches,
+        message: hasExactMatches
+          ? `Hiển thị kết quả tại ${district || city}`
+          : `Không có chi nhánh tại ${district || city}, hiển thị khu vực lân cận`
+      } : null
     });
 
   } catch (error) {
@@ -1878,6 +1935,94 @@ app.get('/api/v2/services/:id/branches', async (req, res) => {
 });
 
 // Health check
+// ============================================
+// DATA MIGRATION: Fix district field in branches
+// ============================================
+app.post('/api/admin/fix-branch-districts', async (req, res) => {
+  try {
+    // Get all branches
+    const { data: branches, error } = await supabase
+      .from('branches')
+      .select('id, branch_name_vn, district');
+
+    if (error) throw error;
+
+    // Parse district from branch_name_vn
+    // Examples:
+    // "Quận 5 – Nguyễn Trãi" -> "Quận 5"
+    // "Quận Tân Bình – Lạc Long Quân" -> "Quận Tân Bình"
+    // "Quận Bình Thạnh – Xô Viết Nghệ Tĩnh" -> "Quận Bình Thạnh"
+    const updates = [];
+
+    for (const branch of branches || []) {
+      const name = branch.branch_name_vn || '';
+      let newDistrict = null;
+
+      // Pattern 1: "Quận X – ..." where X is a number
+      const numberedMatch = name.match(/^(Quận\s*\d+)/i);
+      if (numberedMatch) {
+        newDistrict = numberedMatch[1];
+      }
+
+      // Pattern 2: "Quận [Name] – ..." for named districts
+      if (!newDistrict) {
+        const namedMatch = name.match(/^(Quận\s+(?:Tân Bình|Bình Thạnh|Phú Nhuận|Gò Vấp|Bình Tân|Tân Phú|Thủ Đức))/i);
+        if (namedMatch) {
+          newDistrict = namedMatch[1];
+        }
+      }
+
+      // Pattern 3: "Huyện [Name] – ..." for rural districts
+      if (!newDistrict) {
+        const huyenMatch = name.match(/^(Huyện\s+(?:Bình Chánh|Hóc Môn|Củ Chi|Cần Giờ|Nhà Bè))/i);
+        if (huyenMatch) {
+          newDistrict = huyenMatch[1];
+        }
+      }
+
+      // Pattern 4: "TP. Thủ Đức – ..."
+      if (!newDistrict) {
+        const tpMatch = name.match(/^(TP\.?\s*Thủ Đức)/i);
+        if (tpMatch) {
+          newDistrict = 'TP. Thủ Đức';
+        }
+      }
+
+      if (newDistrict && newDistrict !== branch.district) {
+        updates.push({
+          id: branch.id,
+          old_district: branch.district,
+          new_district: newDistrict,
+          branch_name: name
+        });
+      }
+    }
+
+    // Perform updates
+    let updated = 0;
+    for (const update of updates) {
+      const { error: updateError } = await supabase
+        .from('branches')
+        .update({ district: update.new_district })
+        .eq('id', update.id);
+
+      if (!updateError) updated++;
+    }
+
+    res.json({
+      success: true,
+      total_branches: branches?.length || 0,
+      updates_needed: updates.length,
+      updates_applied: updated,
+      details: updates.slice(0, 20) // Show first 20 for verification
+    });
+
+  } catch (error) {
+    console.error('Fix district error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 app.get('/health', (req, res) => {
   res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
