@@ -2129,7 +2129,10 @@ app.post('/api/admin/insert-package-components', async (req, res) => {
     let inserted = 0;
     let errors = [];
 
-    for (const comp of componentsData) {
+    for (let i = 0; i < componentsData.length; i++) {
+      const comp = componentsData[i];
+      const serviceCode = `PKG${comp.package_id}-COMP${i + 1}-${Date.now()}`;
+
       const { error } = await supabase
         .from('provider_services')
         .insert({
@@ -2141,7 +2144,8 @@ app.post('/api/admin/insert-package-components', async (req, res) => {
           service_type: 'atomic',
           status: 'active',
           is_bookable: false,
-          keywords: comp.name.toLowerCase()
+          keywords: comp.name.toLowerCase(),
+          service_code: serviceCode
         });
 
       if (error) {
