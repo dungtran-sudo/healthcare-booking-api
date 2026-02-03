@@ -1499,13 +1499,106 @@ app.get('/api/setup/status', async (req, res) => {
 // SIMPLIFIED CATALOG SEARCH (V2)
 // ============================================
 
+// Helper: Parse location from search query
+// Examples: "kham thai quan 5" -> { service: "kham thai", district: "Quận 5" }
+//           "xet nghiem mau hcm" -> { service: "xet nghiem mau", city: "Hồ Chí Minh" }
+function parseLocationFromQuery(query) {
+  const queryNorm = normalizeVi(query.toLowerCase());
+  let serviceQuery = query;
+  let detectedDistrict = null;
+  let detectedCity = null;
+
+  // District patterns (Vietnamese)
+  // Matches: "quan 5", "q5", "q.5", "q 5", "quận 5", "quan5"
+  const districtPatterns = [
+    /\b(?:quan|q\.?)\s*(\d{1,2})\b/i,           // quan 5, q5, q.5, q 5
+    /\bquan\s+(binh\s*thanh|tan\s*binh|phu\s*nhuan|go\s*vap|binh\s*tan|tan\s*phu|thu\s*duc|binh\s*chanh|hoc\s*mon|cu\s*chi|can\s*gio|nha\s*be)\b/i,  // named districts
+    /\b(binh\s*thanh|tan\s*binh|phu\s*nhuan|go\s*vap|binh\s*tan|tan\s*phu|thu\s*duc)\b/i,  // named districts without "quan"
+  ];
+
+  // City patterns
+  const cityMappings = {
+    'hcm': 'Hồ Chí Minh',
+    'tphcm': 'Hồ Chí Minh',
+    'ho chi minh': 'Hồ Chí Minh',
+    'tp ho chi minh': 'Hồ Chí Minh',
+    'sai gon': 'Hồ Chí Minh',
+    'sg': 'Hồ Chí Minh',
+    'hn': 'Hà Nội',
+    'ha noi': 'Hà Nội',
+    'tp ha noi': 'Hà Nội',
+    'da nang': 'Đà Nẵng',
+    'dn': 'Đà Nẵng',
+  };
+
+  // Named district mappings (normalized -> display)
+  const namedDistrictMappings = {
+    'binh thanh': 'Bình Thạnh',
+    'tan binh': 'Tân Bình',
+    'phu nhuan': 'Phú Nhuận',
+    'go vap': 'Gò Vấp',
+    'binh tan': 'Bình Tân',
+    'tan phu': 'Tân Phú',
+    'thu duc': 'Thủ Đức',
+    'binh chanh': 'Bình Chánh',
+    'hoc mon': 'Hóc Môn',
+    'cu chi': 'Củ Chi',
+    'can gio': 'Cần Giờ',
+    'nha be': 'Nhà Bè',
+  };
+
+  // Check for numbered districts (quan 5, q5, etc.)
+  const numberedDistrictMatch = queryNorm.match(/\b(?:quan|q\.?)\s*(\d{1,2})\b/i);
+  if (numberedDistrictMatch) {
+    const districtNum = numberedDistrictMatch[1];
+    detectedDistrict = `Quận ${districtNum}`;
+    // Remove the district part from query
+    serviceQuery = query.replace(/\b(?:quận|quan|q\.?)\s*\d{1,2}\b/gi, '').trim();
+  }
+
+  // Check for named districts
+  if (!detectedDistrict) {
+    for (const [normName, displayName] of Object.entries(namedDistrictMappings)) {
+      const pattern = new RegExp(`\\b(?:quan\\s+)?${normName.replace(/\s+/g, '\\s*')}\\b`, 'i');
+      if (pattern.test(queryNorm)) {
+        detectedDistrict = displayName;
+        // Remove the district part from query
+        const removePattern = new RegExp(`\\b(?:quận\\s+|quan\\s+)?${normName.replace(/\s+/g, '\\s*')}\\b`, 'gi');
+        serviceQuery = serviceQuery.replace(removePattern, '').trim();
+        break;
+      }
+    }
+  }
+
+  // Check for cities
+  for (const [pattern, cityName] of Object.entries(cityMappings)) {
+    const cityPattern = new RegExp(`\\b${pattern.replace(/\s+/g, '\\s*')}\\b`, 'i');
+    if (cityPattern.test(queryNorm)) {
+      detectedCity = cityName;
+      // Remove city from query
+      const removePattern = new RegExp(`\\b${pattern.replace(/\s+/g, '\\s*')}\\b`, 'gi');
+      serviceQuery = serviceQuery.replace(removePattern, '').trim();
+      break;
+    }
+  }
+
+  // Clean up extra spaces
+  serviceQuery = serviceQuery.replace(/\s+/g, ' ').trim();
+
+  return {
+    serviceQuery,
+    district: detectedDistrict,
+    city: detectedCity
+  };
+}
+
 // Main search endpoint - returns services with location info
 app.get('/api/v2/search', async (req, res) => {
   try {
     const {
-      q,           // Search query
-      city,        // Filter by city
-      district,    // Filter by district
+      q,           // Search query (may include location like "kham thai quan 5")
+      city: explicitCity,        // Explicit city filter
+      district: explicitDistrict,    // Explicit district filter
       provider_id, // Filter by provider
       limit = 50
     } = req.query;
@@ -1519,7 +1612,25 @@ app.get('/api/v2/search', async (req, res) => {
       });
     }
 
-    const queryNorm = normalizeVi(q);
+    // Parse location from query string
+    const parsed = parseLocationFromQuery(q);
+    const serviceQuery = parsed.serviceQuery;
+    const city = explicitCity || parsed.city;
+    const district = explicitDistrict || parsed.district;
+
+    // If only location was in query (no service terms), return empty
+    if (!serviceQuery || serviceQuery.length < 2) {
+      return res.json({
+        success: true,
+        packages: [],
+        services: [],
+        total: 0,
+        query: q,
+        parsed: { serviceQuery, city, district }
+      });
+    }
+
+    const queryNorm = normalizeVi(serviceQuery);
     const queryWords = queryNorm.split(' ').filter(w => w.length >= 2);
 
     // Get all active services matching the query
@@ -1698,7 +1809,12 @@ app.get('/api/v2/search', async (req, res) => {
       packages,
       services: individualServices,
       total: packages.length + individualServices.length,
-      query: q
+      query: q,
+      parsed: {
+        serviceQuery,
+        city: city || null,
+        district: district || null
+      }
     });
 
   } catch (error) {
