@@ -1936,6 +1936,158 @@ app.get('/api/v2/services/:id/branches', async (req, res) => {
 
 // Health check
 // ============================================
+// DATA MIGRATION: Fix keywords for better search
+// ============================================
+app.post('/api/admin/fix-keywords', async (req, res) => {
+  try {
+    // Get all services
+    const { data: services, error } = await supabase
+      .from('provider_services')
+      .select('id, provider_service_name_vn, keywords')
+      .eq('status', 'active');
+
+    if (error) throw error;
+
+    // Keyword mappings by category
+    const categories = {
+      diabetes: {
+        patterns: ['đái tháo', 'glucose', 'đường huyết', 'hba1c', 'insulin', 'dung nạp'],
+        keywords: 'tieu duong, dai thao duong, duong huyet, glucose, insulin, tieu duong type 2'
+      },
+      bone: {
+        patterns: ['xương', 'loãng xương', 'canxi', 'vitamin d', 'bone'],
+        keywords: 'xuong, khop, xuong khop, loang xuong, canxi, vitamin d'
+      },
+      cardiac: {
+        patterns: ['tim mạch', 'cardiac', 'cholesterol', 'lipid', 'triglycerid'],
+        keywords: 'tim mach, tim, huyet ap, cholesterol, lipid, cardiac, mo mau'
+      },
+      thyroid: {
+        patterns: ['giáp', 'thyroid', 'tsh', 't3', 't4'],
+        keywords: 'tuyen giap, giap, thyroid, tsh, cuong giap, suy giap'
+      },
+      allergy: {
+        patterns: ['dị ứng', 'allerg', 'ige', 'miễn dịch'],
+        keywords: 'di ung, allergy, ige, man ngua, noi man, mien dich'
+      },
+      infectious: {
+        patterns: ['viêm gan', 'hiv', 'std', 'lây', 'truyền nhiễm', 'bệnh xã hội'],
+        keywords: 'truyen nhiem, lay nhiem, viem gan, hiv, std, benh xa hoi'
+      }
+    };
+
+    const updates = [];
+
+    for (const service of services || []) {
+      const name = (service.provider_service_name_vn || '').toLowerCase();
+      const currentKw = (service.keywords || '').toLowerCase();
+      let newKeywords = new Set(currentKw.split(',').map(k => k.trim()).filter(Boolean));
+
+      for (const [cat, info] of Object.entries(categories)) {
+        const matches = info.patterns.some(p => name.includes(p.toLowerCase()));
+        if (matches) {
+          info.keywords.split(',').map(k => k.trim()).forEach(kw => {
+            if (!currentKw.includes(kw)) {
+              newKeywords.add(kw);
+            }
+          });
+        }
+      }
+
+      const newKwString = Array.from(newKeywords).join(', ');
+      if (newKwString !== currentKw && newKeywords.size > currentKw.split(',').length) {
+        updates.push({
+          id: service.id,
+          name: service.provider_service_name_vn,
+          old_keywords: service.keywords,
+          new_keywords: newKwString
+        });
+      }
+    }
+
+    // Apply updates
+    let updated = 0;
+    for (const update of updates) {
+      const { error: updateError } = await supabase
+        .from('provider_services')
+        .update({ keywords: update.new_keywords })
+        .eq('id', update.id);
+
+      if (!updateError) updated++;
+    }
+
+    res.json({
+      success: true,
+      total_services: services?.length || 0,
+      updates_needed: updates.length,
+      updates_applied: updated,
+      sample_updates: updates.slice(0, 10)
+    });
+
+  } catch (error) {
+    console.error('Fix keywords error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ============================================
+// DATA MIGRATION: Fix missing package components
+// ============================================
+app.post('/api/admin/fix-package-components', async (req, res) => {
+  try {
+    // Get all packages
+    const { data: packages, error } = await supabase
+      .from('provider_services')
+      .select('id, provider_service_name_vn, service_type')
+      .eq('service_type', 'package')
+      .eq('status', 'active')
+      .is('parent_service_id', null);
+
+    if (error) throw error;
+
+    // Get existing components
+    const { data: components } = await supabase
+      .from('provider_services')
+      .select('id, parent_service_id, provider_service_name_vn')
+      .not('parent_service_id', 'is', null);
+
+    // Build map of package -> components
+    const componentMap = {};
+    for (const c of components || []) {
+      if (!componentMap[c.parent_service_id]) {
+        componentMap[c.parent_service_id] = [];
+      }
+      componentMap[c.parent_service_id].push(c);
+    }
+
+    // Find packages without components
+    const packagesWithoutComponents = [];
+    for (const pkg of packages || []) {
+      const comps = componentMap[pkg.id] || [];
+      if (comps.length === 0) {
+        packagesWithoutComponents.push({
+          id: pkg.id,
+          name: pkg.provider_service_name_vn,
+          component_count: 0
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      total_packages: packages?.length || 0,
+      packages_with_components: packages.length - packagesWithoutComponents.length,
+      packages_without_components: packagesWithoutComponents.length,
+      missing_components: packagesWithoutComponents
+    });
+
+  } catch (error) {
+    console.error('Fix components error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ============================================
 // DATA MIGRATION: Fix district field in branches
 // ============================================
 app.post('/api/admin/fix-branch-districts', async (req, res) => {
