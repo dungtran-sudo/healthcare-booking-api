@@ -1495,6 +1495,272 @@ app.get('/api/setup/status', async (req, res) => {
   });
 });
 
+// ============================================
+// SIMPLIFIED CATALOG SEARCH (V2)
+// ============================================
+
+// Main search endpoint - returns services with location info
+app.get('/api/v2/search', async (req, res) => {
+  try {
+    const {
+      q,           // Search query
+      city,        // Filter by city
+      district,    // Filter by district
+      provider_id, // Filter by provider
+      limit = 50
+    } = req.query;
+
+    if (!q || q.length < 2) {
+      return res.json({
+        success: true,
+        packages: [],
+        services: [],
+        total: 0
+      });
+    }
+
+    const queryNorm = normalizeVi(q);
+    const queryWords = queryNorm.split(' ').filter(w => w.length >= 2);
+
+    // Get all active services matching the query
+    let query = supabase
+      .from('provider_services')
+      .select(`
+        id,
+        provider_service_name_vn,
+        short_description,
+        service_type,
+        discounted_price,
+        pricing_data,
+        keywords,
+        provider_id,
+        providers:provider_id (
+          id,
+          brand_name_vn
+        )
+      `)
+      .eq('status', 'active')
+      .eq('is_bookable', true)
+      .is('deleted_at', null)
+      .not('discounted_price', 'is', null);
+
+    // Apply provider filter if specified
+    if (provider_id) {
+      query = query.eq('provider_id', provider_id);
+    }
+
+    // Text search
+    if (queryWords.length > 0) {
+      const searchConditions = queryWords.map(word =>
+        `keywords.ilike.%${word}%,provider_service_name_vn.ilike.%${word}%`
+      ).join(',');
+      query = query.or(searchConditions);
+    }
+
+    const { data: services, error } = await query.limit(300);
+    if (error) throw error;
+
+    // Get branch availability for all services
+    const serviceIds = services?.map(s => s.id) || [];
+
+    let branchMap = {};
+    if (serviceIds.length > 0) {
+      const { data: branchServices } = await supabase
+        .from('branch_services')
+        .select(`
+          provider_service_id,
+          branches:branch_id (
+            id,
+            branch_name_vn,
+            district,
+            city,
+            address
+          )
+        `)
+        .in('provider_service_id', serviceIds)
+        .eq('is_available', true);
+
+      // Build map of service_id -> branches
+      branchServices?.forEach(bs => {
+        if (!branchMap[bs.provider_service_id]) {
+          branchMap[bs.provider_service_id] = [];
+        }
+        if (bs.branches) {
+          branchMap[bs.provider_service_id].push(bs.branches);
+        }
+      });
+    }
+
+    // Get package components for packages
+    const packageIds = services?.filter(s => s.service_type === 'package').map(s => s.id) || [];
+    let componentMap = {};
+
+    if (packageIds.length > 0) {
+      const { data: components } = await supabase
+        .from('provider_services')
+        .select('id, provider_service_name_vn, parent_service_id')
+        .in('parent_service_id', packageIds)
+        .eq('status', 'active');
+
+      components?.forEach(c => {
+        if (!componentMap[c.parent_service_id]) {
+          componentMap[c.parent_service_id] = [];
+        }
+        componentMap[c.parent_service_id].push({
+          id: c.id,
+          name: c.provider_service_name_vn
+        });
+      });
+    }
+
+    // Calculate relevance and build results
+    let results = (services || []).map(service => {
+      const branches = branchMap[service.id] || [];
+
+      // Filter by location if specified
+      let matchingBranches = branches;
+      if (city || district) {
+        matchingBranches = branches.filter(b => {
+          const matchCity = !city || normalizeVi(b.city || '').includes(normalizeVi(city));
+          const matchDistrict = !district || normalizeVi(b.district || '').includes(normalizeVi(district));
+          return matchCity && matchDistrict;
+        });
+      }
+
+      // Skip if no matching branches for location filter
+      if ((city || district) && matchingBranches.length === 0) {
+        return null;
+      }
+
+      // Calculate relevance score
+      const name = normalizeVi(service.provider_service_name_vn || '');
+      const desc = normalizeVi(service.short_description || '');
+      const keywords = (service.keywords || '').toLowerCase();
+
+      let score = 0;
+      if (name === queryNorm) score += 1000;
+      else if (name.startsWith(queryNorm)) score += 500;
+      else if (name.includes(queryNorm)) score += 300;
+
+      queryWords.forEach(word => {
+        if (name.includes(word)) score += 50;
+        if (keywords.includes(word)) score += 20;
+        if (desc.includes(word)) score += 10;
+      });
+
+      // Get first matching branch for display
+      const primaryBranch = matchingBranches[0] || branches[0];
+
+      return {
+        id: service.id,
+        name: service.provider_service_name_vn,
+        description: service.short_description,
+        price: service.discounted_price,
+        pricing_data: service.pricing_data,
+        type: service.service_type,
+        provider: {
+          id: service.providers?.id,
+          name: service.providers?.brand_name_vn
+        },
+        location: primaryBranch ? {
+          branch_id: primaryBranch.id,
+          branch_name: primaryBranch.branch_name_vn,
+          district: primaryBranch.district,
+          city: primaryBranch.city,
+          address: primaryBranch.address
+        } : null,
+        branch_count: matchingBranches.length || branches.length,
+        components: service.service_type === 'package' ? (componentMap[service.id] || []) : null,
+        _score: score
+      };
+    }).filter(Boolean);
+
+    // Sort by relevance
+    results.sort((a, b) => b._score - a._score);
+
+    // Filter out low relevance
+    const goodResults = results.filter(r => r._score > 0);
+    if (goodResults.length >= 5) {
+      results = goodResults;
+    }
+
+    // Split into packages and services
+    const packages = results
+      .filter(r => r.type === 'package')
+      .slice(0, parseInt(limit));
+
+    const individualServices = results
+      .filter(r => r.type === 'atomic')
+      .slice(0, parseInt(limit));
+
+    res.json({
+      success: true,
+      packages,
+      services: individualServices,
+      total: packages.length + individualServices.length,
+      query: q
+    });
+
+  } catch (error) {
+    console.error('V2 Search error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Get branches for a specific service
+app.get('/api/v2/services/:id/branches', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { city, district } = req.query;
+
+    const { data: branchServices, error } = await supabase
+      .from('branch_services')
+      .select(`
+        branches:branch_id (
+          id,
+          branch_name_vn,
+          district,
+          city,
+          address,
+          phone,
+          notification_email,
+          operating_hours
+        )
+      `)
+      .eq('provider_service_id', id)
+      .eq('is_available', true);
+
+    if (error) throw error;
+
+    let branches = branchServices?.map(bs => bs.branches).filter(Boolean) || [];
+
+    // Apply location filters
+    if (city || district) {
+      branches = branches.filter(b => {
+        const matchCity = !city || normalizeVi(b.city || '').includes(normalizeVi(city));
+        const matchDistrict = !district || normalizeVi(b.district || '').includes(normalizeVi(district));
+        return matchCity && matchDistrict;
+      });
+    }
+
+    res.json({
+      success: true,
+      data: branches,
+      total: branches.length
+    });
+
+  } catch (error) {
+    console.error('Get branches error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'OK', timestamp: new Date().toISOString() });
