@@ -2138,6 +2138,7 @@ app.post('/api/admin/insert-package-components', async (req, res) => {
         .insert({
           provider_id: providerId,
           parent_service_id: comp.package_id,
+          provider_service_name: comp.name, // English name (same as VN for now)
           provider_service_name_vn: comp.name,
           short_description: comp.description,
           discounted_price: comp.price,
